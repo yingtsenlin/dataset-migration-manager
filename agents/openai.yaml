@@ -1,0 +1,3 @@
+interface:
+  display_name: "Legacy Dataset Migration"
+  short_description: "Inspect legacy datasets, draft descriptions and tags, upload to the new platform, and remove older same-name duplicates safely."
