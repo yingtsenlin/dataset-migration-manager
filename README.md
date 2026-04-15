@@ -1,107 +1,80 @@
-# Dataset Migration Manager
+﻿# Dataset Migration Manager
 
-A practical skill bundle for migrating legacy datasets into a new dataset platform.
+A practical toolkit for migrating legacy ZIP datasets into the YOLO Dataset Manager platform.
 
-This skill helps with:
+## Core scripts
 
-- inspecting a legacy dataset
-- drafting dataset description and tags
-- uploading ZIP datasets through the web platform
-- finding and removing older duplicate datasets with the same name
-- checking migration results
+- `scripts/inspect_dataset_source.py`: inspect ZIP/folder sources and draft metadata.
+- `scripts/upload_dataset.py`: create dataset and import ZIP via Playwright.
+- `scripts/find_datasets_by_creator_status.py`: search datasets and export matched IDs.
+- `scripts/delete_datasets_by_id.py`: delete datasets by explicit ID/href only.
 
-## Folder structure
+## Required cleanup rule
 
-```text
-dataset-migration-manager/
-├── README.md
-├── SKILL.md
-├── agents/
-│   └── openai.yaml
-├── scripts/
-│   ├── upload_dataset.py
-│   ├── cleanup_duplicates.py
-│   └── inspect_dataset_source.py
-└── references/
-    ├── workflow.md
-    ├── description-rules.md
-    ├── tagging-rules.md
-    ├── duplicate-cleanup-rules.md
-    └── quality-checklist.md
-```
+Duplicate deletion must always follow this order:
 
-## What each script does
+1. Search first and collect dataset IDs.
+2. Review keep/delete decision.
+3. Delete by ID only.
 
-```inspect_dataset_source.py```
-
-Inspect a legacy dataset folder or ZIP file and generate a draft summary, description, and tags.
-
-Use this first before upload.
-
-```upload_dataset.py```
-
-Open the target dataset platform, create a dataset, fill metadata, and import the ZIP file.
-
-This is the main upload automation script.
-
-```cleanup_duplicates.py```
-
-Find datasets with the same name and help remove older duplicates.
-
-Use report `mode` first, then `apply` only after checking the result.
+For same-name duplicates, keep the largest ID and delete smaller IDs.
 
 ## Recommended workflow
 
-1. Inspect the source dataset
-2. Review the suggested description and tags
-3. Upload the dataset
-4. Check duplicate datasets with the same name
-5. Remove old duplicates if the report is correct
-6. Verify the final result
+1. Inspect source datasets.
+2. Confirm description and tags.
+3. Upload datasets.
+4. Search duplicate candidates and save JSON output.
+5. Delete duplicates by ID (keep largest ID).
+6. Validate final results.
 
-## Quick start
+## Quick start (PowerShell)
 
-1. Inspect a test dataset
-python scripts/inspect_dataset_source.py \
-  --source "./test_data/ttcps_20250401_0830.zip" \
+### 1. Inspect source ZIP(s)
+
+```powershell
+python .\scripts\inspect_dataset_source.py `
+  --source ".\test" `
   --output-format pretty
-2. Upload the dataset
-python scripts/upload_dataset.py \
-  --base-url "http://10.10.91.41/projects/1" \
-  --source "./test_data/ttcps_20250401_0830.zip" \
-  --dataset-name "ttcps_20250401_0830_test" \
-  --description "白天，一人，安全帽，腰包，沒有面具" \
-  --tags "ttcps,day,person,helmet,pack,no-mask,legacy" \
-  --require-manual-login \
-  --screenshot-dir "./debug_shots"
-3. Report duplicate datasets
-python scripts/cleanup_duplicates.py \
-  --base-url "http://10.10.91.41/projects/1" \
-  --dataset-name "ttcps_20250401_0830_test" \
-  --mode report \
-  --require-manual-login
-4. Apply duplicate cleanup
-python scripts/cleanup_duplicates.py \
-  --base-url "http://10.10.91.41/projects/1" \
-  --dataset-name "ttcps_20250401_0830_test" \
-  --mode apply \
-  --require-manual-login \
-  --assume-ui-sorted-newest-first
+```
 
-### Notes
+### 2. Upload source ZIP(s)
 
-Start with a small test dataset first
-Use a dataset name ending in _test during early testing
-Always run duplicate cleanup in report mode before apply
-Keep debug screenshots enabled during first runs
-If the website layout changes, update upload_dataset.py before rerunning
+```powershell
+python .\scripts\upload_dataset.py `
+  --base-url "http://10.10.91.41/projects/1" `
+  --source ".\test" `
+  --append-test-suffix `
+  --require-manual-login `
+  --screenshot-dir ".\debug_shots"
+```
 
-### References
+### 3. Search `_test` datasets and export IDs
 
-See files in references/ for:
+```powershell
+python .\scripts\find_datasets_by_creator_status.py `
+  --base-url "http://10.10.91.41/projects/1" `
+  --name-contains "_test" `
+  --require-manual-login `
+  --output-format pretty `
+  --output-file ".\artifacts\find_test_result.json"
+```
 
-* workflow details
-* description writing rules
-* tag vocabulary rules
-* duplicate cleanup safety rules
-* final quality checks
+### 4. Delete duplicates by ID, keep largest ID
+
+```powershell
+python .\scripts\delete_datasets_by_id.py `
+  --base-url "http://10.10.91.41/projects/1" `
+  --from-find-json ".\artifacts\find_test_result.json" `
+  --delete-old-only `
+  --require-manual-login `
+  --result-file ".\artifacts\delete_result.json"
+```
+
+## References
+
+- `references/workflow.md`
+- `references/description-rules.md`
+- `references/tagging-rules.md`
+- `references/duplicate-cleanup-rules.md`
+- `references/quality-checklist.md`

@@ -96,9 +96,24 @@ def parse_args() -> argparse.Namespace:
 def wait_for_manual_login_if_needed(page: Page, require_manual_login: bool) -> None:
     if not require_manual_login:
         return
-    print("頁面已開啟。完成手動登入後，回到終端機按 Enter 繼續。")
-    input()
-    page.wait_for_timeout(500)
+    print("頁面已開啟。請先在瀏覽器完成手動登入；登入完成後回到終端機按 Enter 繼續。")
+    try:
+        input()
+        page.wait_for_timeout(500)
+        return
+    except EOFError:
+        # Non-interactive environments cannot accept Enter input; passively wait for a logged-in UI state.
+        print("[info] 目前環境無法接收 Enter，改為被動等待你完成登入（不會自動點擊頁面）。")
+    for _ in range(600):
+        try:
+            project_menu = page.locator("xpath=//span[normalize-space()='專案']").first
+            if project_menu.count() > 0 and project_menu.is_visible():
+                page.wait_for_timeout(500)
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    raise TimeoutError("等待手動登入逾時，請確認是否已登入並停留在系統內頁。")
 
 
 def ensure_project_page(page: Page, base_url: str) -> None:
@@ -199,32 +214,71 @@ def choose_card_locator(entry: Locator) -> Locator:
 
 def collect_duplicate_cards(page: Page, dataset_name: str, selectors: Selectors) -> list[DatasetCard]:
     anchor_selector = selectors.dataset_anchor_by_name_tpl.format(name=dataset_name)
-    anchors = page.locator(anchor_selector)
     cards: list[DatasetCard] = []
+    seen_keys: set[str] = set()
 
-    for idx in range(anchors.count()):
-        entry = anchors.nth(idx)
-        card = choose_card_locator(entry)
-        text = card.inner_text().strip()
-        created_at, raw = extract_created_time(text)
-        reason = "timestamp visible in card" if created_at else "fallback to current UI order"
-        cards.append(
-            DatasetCard(
-                dataset_name=dataset_name,
-                card_locator=card,
-                entry_locator=entry,
-                card_text=text,
-                created_at=created_at,
-                created_at_raw=raw,
-                detection_reason=reason,
+    def collect_current_view() -> None:
+        anchors = page.locator(anchor_selector)
+        for idx in range(anchors.count()):
+            entry = anchors.nth(idx)
+            card = choose_card_locator(entry)
+            text = card.inner_text().strip()
+            created_at, raw = extract_created_time(text)
+            reason = "timestamp visible in card" if created_at else "fallback to current UI order"
+            href = (entry.get_attribute("href") or "").strip()
+            key = href if href else f"{dataset_name}|{raw or ''}|{text[:80]}|{idx}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            cards.append(
+                DatasetCard(
+                    dataset_name=dataset_name,
+                    card_locator=card,
+                    entry_locator=entry,
+                    card_text=text,
+                    created_at=created_at,
+                    created_at_raw=raw,
+                    detection_reason=reason,
+                )
             )
+
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(300)
+
+    last_height = -1
+    stable_rounds = 0
+    for _ in range(240):
+        collect_current_view()
+        current_height = page.evaluate("document.documentElement.scrollHeight")
+        at_bottom = page.evaluate(
+            "window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4"
         )
+        if at_bottom and current_height == last_height:
+            stable_rounds += 1
+        else:
+            stable_rounds = 0
+        if stable_rounds >= 2:
+            break
+        last_height = current_height
+        page.evaluate("window.scrollBy(0, Math.max(300, Math.floor(window.innerHeight * 0.85)))")
+        page.wait_for_timeout(350)
+
+    # Keep page state predictable for later operations.
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(250)
     return cards
 
 
 def decide_cleanup(cards: list[DatasetCard], assume_ui_sorted_newest_first: bool) -> CleanupDecision:
     if len(cards) < 2:
         raise ValueError("找不到兩筆以上同名資料集，無法進行重複刪除判斷。")
+
+    if assume_ui_sorted_newest_first:
+        return CleanupDecision(
+            keep=cards[0],
+            delete=list(reversed(cards[1:])),
+            reason="keep top item and delete lower items; delete from bottom-most first because current UI is sorted newest first",
+        )
 
     cards_with_time = [card for card in cards if card.created_at is not None]
     if len(cards_with_time) == len(cards):
@@ -235,14 +289,7 @@ def decide_cleanup(cards: list[DatasetCard], assume_ui_sorted_newest_first: bool
             reason="keep newest dataset by parsed created_at timestamp",
         )
 
-    if assume_ui_sorted_newest_first:
-        return CleanupDecision(
-            keep=cards[0],
-            delete=cards[1:],
-            reason="timestamps missing; keep top item because current UI is sorted newest first",
-        )
-
-    raise ValueError("建立時間不可用，而且未啟用 UI 排序 fallback，無法安全決定保留項目。")
+    raise ValueError("建立時間不可用，而且未啟用 UI 排序判斷，無法安全決定保留項目。")
 
 
 def save_screenshot(page: Page, screenshot_dir: Optional[Path], name: str) -> None:
@@ -280,7 +327,7 @@ def find_delete_button_for_card(page: Page, card: DatasetCard, selectors: Select
         card.entry_locator.locator("xpath=ancestor::div[4]"),
         card.entry_locator.locator("xpath=ancestor::div[5]"),
         page.locator(
-            f"xpath=//*[.//a[normalize-space()='{card.dataset_name}'] and .//*[normalize-space()='刪除']][1]"
+            f"xpath=(//*[.//a[normalize-space()='{card.dataset_name}'] and .//*[normalize-space()='刪除']])[last()]"
         ),
     ]
 

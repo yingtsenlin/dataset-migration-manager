@@ -14,6 +14,7 @@ Use these bundled files directly:
 - `scripts/inspect_dataset_source.py`
 - `scripts/upload_dataset.py`
 - `scripts/cleanup_duplicates.py`
+- `scripts/find_datasets_by_creator_status.py`
 - `references/workflow.md`
 - `references/description-rules.md`
 - `references/tagging-rules.md`
@@ -73,6 +74,29 @@ Use `--output-format json` when another tool or script needs to consume the resu
 - If the source contains no common annotation files, continue with conservative metadata and mention the warning.
 - If the source contains no common image files, stop and report unless the user explicitly wants metadata drafting only.
 - When multiple ZIPs are found in a source directory, inspect all of them and treat each ZIP as a separate migration target.
+
+## Status Verification Utility
+
+Use `scripts/find_datasets_by_creator_status.py` when the user asks to filter datasets by creator and review status.
+
+Important behavior:
+
+- Status labels are read from card tags in `ant-card-extra` (for example `待審核`).
+- Default matching includes common alias pairs:
+  - `審核中` also matches `待審核`
+  - `待審核` also matches `審核中`
+- Add `--strict-status` if exact status text is required.
+
+Default command pattern:
+
+```powershell
+python .\scripts\find_datasets_by_creator_status.py `
+  --base-url "http://<dataset-list-url>" `
+  --creator "林盈岑" `
+  --status "審核中" `
+  --require-manual-login `
+  --output-format pretty
+```
 
 ## Stage 2: generate or revise metadata
 
@@ -211,9 +235,9 @@ python .\scripts\cleanup_duplicates.py `
 Also follow `references/duplicate-cleanup-rules.md`.
 
 - Match exact same name only unless the user explicitly requests fuzzy matching.
-- Prefer created timestamps parsed from the UI.
-- If timestamps are unavailable or ambiguous, do not delete automatically.
-- Only use `--assume-ui-sorted-newest-first` when the user confirms the page is reliably sorted newest-first or when the UI clearly shows that ordering.
+- Default mode uses current UI order (newest on top): keep the top item and delete lower duplicates.
+- If UI sorting is uncertain, switch to report mode first and require explicit confirmation before apply.
+- Only disable `--assume-ui-sorted-newest-first` when the page is not reliably sorted newest-first.
 - Never claim a delete is safe if the keep target cannot be explained.
 
 ## Stage 6: validate the migration result

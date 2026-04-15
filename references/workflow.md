@@ -9,7 +9,7 @@ This file defines the detailed migration decision flow for `dataset-migration-ma
 3. Inspect the source before generating or applying metadata.
 4. Validate metadata before upload.
 5. Update automation only if needed.
-6. Upload first, clean duplicates second.
+6. Upload first, then run ID-based duplicate cleanup.
 7. Validate after every destructive or state-changing action.
 8. End with a short operational summary.
 
@@ -66,9 +66,9 @@ Use duplicate cleanup only when the user asks to:
 
 Run:
 
-1. collect matching datasets by exact name
-2. report keep/delete candidates
-3. apply deletion only if safety conditions are satisfied
+1. search datasets and collect target IDs first
+2. report keep/delete candidates from IDs
+3. apply deletion by ID only
 
 ## Step 2: inspect the source dataset
 
@@ -191,32 +191,31 @@ Stop and report immediately if:
 
 Do not continue to cleanup when upload is not clearly successful.
 
-## Step 6: evaluate duplicate cleanup
+## Step 6: evaluate duplicate cleanup (ID-first mandatory)
 
-Use `scripts/cleanup_duplicates.py` after a successful upload when duplicates are expected.
+Use `scripts/find_datasets_by_creator_status.py` + `scripts/delete_datasets_by_id.py` after a successful upload when duplicates are expected.
 
 ### Safe operating order
 
-1. run report mode
-2. inspect keep/delete decision
-3. run apply mode only if the keep target is reliable
+1. run `find` and save JSON result
+2. inspect keep/delete decision from dataset IDs
+3. run `delete` with `--delete-old-only` (or explicit `--dataset-id`) only if the keep target is reliable
 
 ### Keep/delete decision rules
 
 - match by exact dataset name
-- prefer parsed created timestamps
-- if timestamps are missing, use the current UI order because the page is currently sorted newest first
-- keep the newest dataset only
-- delete all older exact-name duplicates only
+- keep the largest dataset ID
+- delete smaller IDs for the same dataset name
+- deletion must target dataset IDs only, never by guessed card order
 
 ### Hard stop conditions
 
 Do not apply deletion when:
 
-- fewer than two exact-name datasets are found
-- created timestamps conflict or cannot be interpreted
-- the supposedly newest dataset looks incomplete
-- the page sorting order is unknown and timestamp parsing failed
+- no search result JSON exists yet
+- target dataset IDs are missing or ambiguous
+- keep target cannot be explained as the largest ID of the same-name group
+- the delete command is about to run without explicit ID resolution
 
 ## Step 7: validate the result
 
@@ -259,24 +258,26 @@ python .\scripts\upload_dataset.py `
   --require-manual-login
 ```
 
-### Report duplicates
+### Find duplicates / candidates first
 
 ```powershell
-python .\scripts\cleanup_duplicates.py `
+python .\scripts\find_datasets_by_creator_status.py `
   --base-url "http://<dataset-list-url>" `
-  --dataset-name "<exact-dataset-name>" `
-  --mode report `
-  --require-manual-login
+  --name-contains "_test" `
+  --require-manual-login `
+  --output-format pretty `
+  --output-file ".\artifacts\find_test_result.json"
 ```
 
-### Apply duplicate cleanup
+### Apply duplicate cleanup by ID (keep largest ID)
 
 ```powershell
-python .\scripts\cleanup_duplicates.py `
+python .\scripts\delete_datasets_by_id.py `
   --base-url "http://<dataset-list-url>" `
-  --dataset-name "<exact-dataset-name>" `
-  --mode apply `
-  --require-manual-login
+  --from-find-json ".\artifacts\find_test_result.json" `
+  --delete-old-only `
+  --require-manual-login `
+  --result-file ".\artifacts\delete_result.json"
 ```
 
 ## Final summary template

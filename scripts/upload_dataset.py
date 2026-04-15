@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import random
@@ -8,12 +8,13 @@ import time
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, Optional
 from urllib.parse import urlparse
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 try:
     from PIL import Image, ImageStat
@@ -24,16 +25,34 @@ except ImportError:
 
 @dataclass(frozen=True)
 class Selectors:
-    create_button: str = "xpath=//button[contains(., '新增原始資料集')]"
+    create_button_candidates: tuple[str, ...] = (
+        "xpath=//button[contains(normalize-space(.), '建立資料集')]",
+        "xpath=//button[contains(normalize-space(.), '新增資料集')]",
+        "xpath=//button[contains(normalize-space(.), '創建資料集')]",
+        "xpath=//button[contains(normalize-space(.), '建立') and contains(normalize-space(.), '資料集')]",
+        "xpath=//button[contains(normalize-space(.), '新增') and contains(normalize-space(.), '資料集')]",
+        "xpath=//button[contains(normalize-space(.), '創建') and contains(normalize-space(.), '資料集')]",
+        "xpath=//button[contains(normalize-space(.), 'Create') and contains(normalize-space(.), 'Dataset')]",
+        "xpath=//button[contains(normalize-space(.), '資料集')]",
+        "xpath=//button[contains(normalize-space(.), 'Create Dataset')]",
+    )
     name_input: str = "#name"
     description_input: str = "#description"
     tags_input: str = "#tags"
-    modal_footer: str = "xpath=//div[contains(@class, 'ant-modal-footer')]"
-    confirm_button: str = "xpath=//div[contains(@class, 'ant-modal-footer')]//button[2]"
-    zip_input_primary: str = "xpath=//input[@type='file' and (@accept='.zip' or contains(@accept, '.zip'))]"
-    zip_input_fallback: str = "xpath=(//input[@type='file'])[3]"
-    upload_list: str = "xpath=//div[contains(@class, 'ant-upload-list')]//div"
-    import_button: str = "xpath=//button[contains(., '匯入 ZIP')]"
+    create_confirm_candidates: tuple[str, ...] = (
+        "xpath=//div[contains(@class, 'ant-modal-footer')]//button[contains(@class, 'ant-btn-primary')]",
+        "xpath=//div[contains(@class, 'ant-modal-footer')]//button[last()]",
+    )
+    zip_input_primary: str = "xpath=//input[@type='file' and contains(@accept, '.zip')]"
+    zip_input_fallback: str = "xpath=//input[@type='file']"
+    upload_list: str = "xpath=//div[contains(@class, 'ant-upload-list')]"
+    import_button_candidates: tuple[str, ...] = (
+        "xpath=//button[contains(normalize-space(.), '匯入 ZIP 至資料集')]",
+        "xpath=//button[contains(normalize-space(.), '匯入 ZIP')]",
+        "xpath=//button[contains(normalize-space(.), '導入 ZIP')]",
+        "xpath=//button[contains(normalize-space(.), 'ZIP') and contains(normalize-space(.), '資料集')]",
+        "xpath=//button[contains(normalize-space(.), 'Import ZIP')]",
+    )
 
 
 @dataclass
@@ -47,7 +66,6 @@ class DatasetMetadata:
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-ANNOTATION_EXTS = {".json", ".jsonl", ".txt", ".xml", ".csv", ".yaml", ".yml"}
 YAML_FILENAMES = {"data.yaml", "data.yml"}
 LABEL_DIR_NAMES = {"labels", "label"}
 DESCRIPTION_PRIORITY = ["people", "person", "helmet", "vest", "pack", "backpack", "mask", "bike", "motorcycle", "truck", "car"]
@@ -87,87 +105,36 @@ DAY_TEXT = "白天"
 NIGHT_TEXT = "晚上"
 
 
+def log(message: str) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create datasets and upload ZIP archives through the existing Playwright workflow.",
+        description="Create datasets and upload ZIP archives through Playwright.",
     )
     parser.add_argument("--base-url", required=True, help="Dataset list page URL.")
-    parser.add_argument(
-        "--source",
-        required=True,
-        help="A single .zip file or a directory containing .zip files.",
-    )
+    parser.add_argument("--source", required=True, help="A single .zip file or a directory containing .zip files.")
     parser.add_argument("--dataset-name", help="Override dataset name for single ZIP mode.")
     parser.add_argument("--description", help="Override description for single ZIP mode.")
-    parser.add_argument(
-        "--tags",
-        help="Comma-separated tags override for single ZIP mode, e.g. 'ttcps,day,person'.",
-    )
-    parser.add_argument(
-        "--browser-channel",
-        default="msedge",
-        help="Chromium channel name. Default: msedge",
-    )
+    parser.add_argument("--tags", help="Comma-separated tags override for single ZIP mode.")
+    parser.add_argument("--browser-channel", default="msedge", help="Chromium channel name. Default: msedge")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode.")
+    parser.add_argument("--require-manual-login", action="store_true", help="Pause for manual login.")
+    parser.add_argument("--login-url", help="Optional login page URL. Defaults to --base-url.")
+    parser.add_argument("--username", help="Login username for automated sign-in.")
+    parser.add_argument("--password", help="Login password for automated sign-in.")
     parser.add_argument(
-        "--require-manual-login",
+        "--append-test-suffix",
         action="store_true",
-        help="Pause after opening the page and wait for Enter so you can log in manually.",
+        help="Append '_test' to dataset names before upload.",
     )
-    parser.add_argument(
-        "--post-create-wait-ms",
-        type=int,
-        default=2000,
-        help="Wait time after creating a dataset. Default: 2000",
-    )
-    parser.add_argument(
-        "--post-import-wait-ms",
-        type=int,
-        default=5000,
-        help="Wait time after clicking import. Default: 5000",
-    )
-    parser.add_argument(
-        "--screenshot-dir",
-        help="Directory for debug screenshots. If omitted, screenshots are disabled.",
-    )
-    parser.add_argument(
-        "--keep-debug-screenshots",
-        action="store_true",
-        help="Keep debug screenshots after a successful import.",
-    )
+    parser.add_argument("--post-create-wait-ms", type=int, default=2000)
+    parser.add_argument("--post-import-wait-ms", type=int, default=5000)
+    parser.add_argument("--screenshot-dir", help="Directory for debug screenshots.")
+    parser.add_argument("--keep-debug-screenshots", action="store_true")
     return parser.parse_args()
-
-
-TAG_HINTS = {
-    "helmet": ["helmet", "hardhat", "hard-hat", "safety helmet", "\u5b89\u5168\u5e3d"],
-    "mask": ["mask", "face mask", "\u53e3\u7f69"],
-    "pack": ["pack", "waistpack", "waist pack", "fannypack", "fanny pack", "\u8170\u5305"],
-    "backpack": ["backpack", "\u80cc\u5305"],
-    "vest": ["vest", "reflective vest", "\u53cd\u5149\u80cc\u5fc3", "\u80cc\u5fc3"],
-    "person": ["person", "human", "pedestrian", "\u4eba", "\u4eba\u54e1"],
-    "people": ["people", "\u591a\u4eba"],
-    "bike": ["bike", "bicycle", "\u8173\u8e0f\u8eca", "\u81ea\u884c\u8eca", "\u55ae\u8eca"],
-    "motorcycle": ["motorcycle", "motorbike", "\u6a5f\u8eca"],
-    "truck": ["truck", "\u5361\u8eca"],
-    "car": ["car", "vehicle", "\u6c7d\u8eca", "\u8eca\u8f1b"],
-}
-
-DESCRIPTION_MAP = {
-    "people": "\u591a\u4eba",
-    "person": "\u4e00\u4eba",
-    "helmet": "\u5b89\u5168\u5e3d",
-    "mask": "\u53e3\u7f69",
-    "pack": "\u8170\u5305",
-    "backpack": "\u80cc\u5305",
-    "vest": "\u53cd\u5149\u80cc\u5fc3",
-    "bike": "\u8173\u8e0f\u8eca",
-    "motorcycle": "\u6a5f\u8eca",
-    "truck": "\u5361\u8eca",
-    "car": "\u6c7d\u8eca",
-}
-
-DAY_TEXT = "\u767d\u5929"
-NIGHT_TEXT = "\u665a\u4e0a"
 
 
 def normalize_tags(raw: Optional[str]) -> list[str]:
@@ -176,47 +143,23 @@ def normalize_tags(raw: Optional[str]) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def infer_period_from_time(time_str: Optional[str]) -> Optional[str]:
-    if not time_str or len(time_str) < 2 or not time_str[:2].isdigit():
-        return None
-    hour = int(time_str[:2])
-    return "白天" if 6 <= hour <= 18 else "晚上"
+def looks_garbled_text(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+    if "�" in cleaned:
+        return True
+    return cleaned.count("?") / max(len(cleaned), 1) >= 0.2
 
 
-"""
-def infer_metadata_from_stem(stem: str, source_zip: Path) -> DatasetMetadata:
-    parts = stem.split("_")
-    apc_id = parts[0] if parts else None
-    time_str = parts[2] if len(parts) >= 3 else None
-    period = infer_period_from_time(time_str)
-
-    description_tokens = []
-    if period:
-        description_tokens.append(period)
-    description_tokens.extend(["一人", "安全帽", "面具"])
-
-    tags = ["person", "helmet", "mask", "pack"]
-    if "ttcps" in stem.lower():
-        tags.insert(0, "ttcps")
-    elif apc_id:
-        tags.insert(0, apc_id.lower())
-
-    if period == "白天":
-        tags.insert(1, "day")
-    elif period == "晚上":
-        tags.insert(1, "night")
-
-    deduped_tags = list(dict.fromkeys(tags))
-    description = "，".join(description_tokens)
-    return DatasetMetadata(
-        dataset_name=stem,
-        description=description,
-        tags=deduped_tags,
-        source_zip=source_zip,
-        apc_id=apc_id,
-        time_str=time_str,
-    )
-"""
+def choose_description(override: Optional[str], inferred: str) -> str:
+    if override:
+        return inferred if looks_garbled_text(override) else override
+    if looks_garbled_text(inferred):
+        return "待人工確認"
+    return inferred
 
 
 def infer_tokens_from_name(stem: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -267,7 +210,7 @@ def has_legacy_hint(stem: str) -> bool:
 
 
 def normalize_class_name(raw: str) -> Optional[str]:
-    cleaned = raw.strip().strip("\"'").lower()
+    cleaned = raw.strip().strip('"\'').lower()
     if not cleaned:
         return None
     for canonical, hints in TAG_HINTS.items():
@@ -419,19 +362,6 @@ def infer_periods_from_sample_images(zip_file: Path, image_paths: list[str], ste
     return list(dict.fromkeys(periods))
 
 
-"""
-def build_description(periods: list[str], observed_tags: list[str]) -> str:
-    description_tokens: list[str] = []
-    description_tokens.extend(periods)
-    for tag in DESCRIPTION_PRIORITY:
-        if tag in observed_tags and tag in DESCRIPTION_MAP:
-            description_tokens.append(DESCRIPTION_MAP[tag])
-    return "，".join(dict.fromkeys(description_tokens)) if description_tokens else "待人工確認"
-
-
-"""
-
-
 def build_description(periods: list[str], observed_tags: list[str]) -> str:
     description_tokens: list[str] = []
     description_tokens.extend(periods)
@@ -439,8 +369,8 @@ def build_description(periods: list[str], observed_tags: list[str]) -> str:
         if tag in observed_tags and tag in DESCRIPTION_MAP:
             description_tokens.append(DESCRIPTION_MAP[tag])
     if not description_tokens:
-        return "\u5f85\u4eba\u5de5\u78ba\u8a8d"
-    return "\uff0c".join(dict.fromkeys(description_tokens))
+        return "待人工確認"
+    return "，".join(dict.fromkeys(description_tokens))
 
 
 def build_tags(stem: str, apc_id: Optional[str], periods: list[str], observed_tags: list[str]) -> list[str]:
@@ -475,7 +405,7 @@ def infer_metadata_from_stem(stem: str, source_zip: Path) -> DatasetMetadata:
         periods.extend(infer_periods_from_sample_images(source_zip, image_paths, stem))
 
     periods = list(dict.fromkeys(periods))
-    description = build_description(periods, observed_tags)
+    description = choose_description(None, build_description(periods, observed_tags))
     tags = build_tags(stem, apc_id, periods, observed_tags)
 
     return DatasetMetadata(
@@ -491,7 +421,7 @@ def infer_metadata_from_stem(stem: str, source_zip: Path) -> DatasetMetadata:
 def build_metadata_list(args: argparse.Namespace) -> list[DatasetMetadata]:
     source_path = Path(args.source)
     if not source_path.exists():
-        raise FileNotFoundError(f"找不到 source 路徑: {source_path}")
+        raise FileNotFoundError(f"Cannot find --source path: {source_path}")
 
     if source_path.is_file():
         zip_files = [source_path]
@@ -499,19 +429,21 @@ def build_metadata_list(args: argparse.Namespace) -> list[DatasetMetadata]:
         zip_files = sorted(source_path.glob("*.zip"))
 
     if not zip_files:
-        raise FileNotFoundError(f"在 {source_path} 找不到任何 .zip 檔案")
+        raise FileNotFoundError(f"No .zip files found under {source_path}")
 
     if len(zip_files) > 1 and any([args.dataset_name, args.description, args.tags]):
-        raise ValueError("當 source 是多個 ZIP 時，不可同時指定 --dataset-name / --description / --tags。")
+        raise ValueError("When --source is a directory, do not use --dataset-name/--description/--tags overrides.")
 
     metadata_items: list[DatasetMetadata] = []
     for zip_file in zip_files:
         inferred = infer_metadata_from_stem(zip_file.stem, zip_file)
         if len(zip_files) == 1:
             inferred.dataset_name = args.dataset_name or inferred.dataset_name
-            inferred.description = args.description or inferred.description
+            inferred.description = choose_description(args.description, inferred.description)
             override_tags = normalize_tags(args.tags)
             inferred.tags = override_tags or inferred.tags
+        if args.append_test_suffix and not inferred.dataset_name.endswith("_test"):
+            inferred.dataset_name = f"{inferred.dataset_name}_test"
         metadata_items.append(inferred)
 
     return metadata_items
@@ -521,7 +453,7 @@ def save_debug_screenshot(page: Page, screenshot_paths: list[Path], screenshot_p
     screenshot_path.parent.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(screenshot_path), full_page=True)
     screenshot_paths.append(screenshot_path)
-    print(f"[debug] 已儲存截圖: {screenshot_path}")
+    log(f"[debug] saved screenshot: {screenshot_path}")
 
 
 def cleanup_debug_screenshots(screenshot_paths: Iterable[Path]) -> None:
@@ -529,28 +461,107 @@ def cleanup_debug_screenshots(screenshot_paths: Iterable[Path]) -> None:
         try:
             if shot_path.exists():
                 shot_path.unlink()
-                print(f"[debug] 已刪除截圖: {shot_path}")
-        except Exception as exc:  # pragma: no cover - defensive cleanup
-            print(f"[warn] 刪除截圖失敗 {shot_path}: {exc}")
+        except Exception:
+            pass
 
 
-def wait_until_button_enabled(page: Page, selector: str, timeout_seconds: int = 15) -> None:
+def wait_until_button_enabled(button: Locator, timeout_seconds: int = 15) -> None:
     deadline = time.time() + timeout_seconds
-    button = page.locator(selector)
     while time.time() < deadline:
         disabled = button.get_attribute("disabled")
         if disabled is None or disabled == "false":
             return
-        page.wait_for_timeout(500)
-    raise TimeoutError(f"按鈕在 {timeout_seconds} 秒內沒有啟用: {selector}")
+        button.page.wait_for_timeout(500)
+    raise TimeoutError(f"button not enabled within {timeout_seconds}s")
 
 
 def wait_for_manual_login_if_needed(page: Page, require_manual_login: bool) -> None:
     if not require_manual_login:
         return
-    print("請在瀏覽器中完成登入（如果需要），完成後回到終端機按 Enter。")
-    input()
-    page.wait_for_timeout(500)
+    log("頁面已開啟。請先在瀏覽器完成手動登入；登入完成後回到終端機按 Enter 繼續。")
+    try:
+        input()
+        page.wait_for_timeout(500)
+        return
+    except EOFError:
+        log("[info] 目前環境無法接收 Enter，改為被動等待你完成登入（不會自動點擊頁面）。")
+
+    for _ in range(600):
+        try:
+            project_menu = page.locator("xpath=//span[normalize-space()='專案']").first
+            if project_menu.count() > 0 and project_menu.is_visible():
+                page.wait_for_timeout(500)
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    raise TimeoutError("等待手動登入逾時，請確認是否已登入並停留在系統內頁。")
+
+
+def login_with_credentials_if_provided(
+    page: Page,
+    username: Optional[str],
+    password: Optional[str],
+) -> bool:
+    if not username or not password:
+        return False
+
+    user_candidates = (
+        "xpath=//input[@name='username']",
+        "xpath=//input[@id='username']",
+        "xpath=//input[contains(@placeholder, '帳號')]",
+        "xpath=//input[contains(@placeholder, '使用者')]",
+        "xpath=//input[@type='email']",
+        "xpath=//input[@type='text']",
+    )
+    pass_candidates = (
+        "xpath=//input[@name='password']",
+        "xpath=//input[@id='password']",
+        "xpath=//input[contains(@placeholder, '密碼')]",
+        "xpath=//input[@type='password']",
+    )
+    submit_candidates = (
+        "xpath=//button[@type='submit']",
+        "xpath=//button[contains(normalize-space(.), '登入')]",
+        "xpath=//button[contains(normalize-space(.), 'Login')]",
+        "xpath=//button[contains(normalize-space(.), 'Sign in')]",
+    )
+
+    def _first_visible(selectors: Iterable[str]) -> Optional[Locator]:
+        for selector in selectors:
+            loc = page.locator(selector)
+            try:
+                for idx in range(loc.count()):
+                    item = loc.nth(idx)
+                    if item.is_visible():
+                        return item
+            except Exception:
+                continue
+        return None
+
+    user_input = _first_visible(user_candidates)
+    pass_input = _first_visible(pass_candidates)
+    if user_input is None or pass_input is None:
+        raise RuntimeError("找不到登入欄位，請檢查登入頁面是否變更。")
+
+    user_input.fill(username)
+    pass_input.fill(password)
+    submit = _first_visible(submit_candidates)
+    if submit is not None:
+        submit.click()
+    else:
+        pass_input.press("Enter")
+
+    for _ in range(120):
+        try:
+            project_menu = page.locator("xpath=//span[normalize-space()='專案']").first
+            if project_menu.count() > 0 and project_menu.is_visible():
+                page.wait_for_timeout(400)
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+    raise TimeoutError("自動登入逾時，請確認帳密與登入頁面。")
 
 
 def ensure_project_page(page: Page, base_url: str) -> None:
@@ -600,98 +611,92 @@ def ensure_project_page(page: Page, base_url: str) -> None:
         page.wait_for_timeout(800)
 
 
+def find_first_visible(page: Page, selectors: Iterable[str]) -> Locator:
+    for selector in selectors:
+        loc = page.locator(selector)
+        try:
+            count = loc.count()
+        except Exception:
+            continue
+        for idx in range(count):
+            candidate = loc.nth(idx)
+            try:
+                if candidate.is_visible():
+                    return candidate
+            except Exception:
+                continue
+    raise RuntimeError(f"No visible element for selectors: {list(selectors)}")
+
+
 def create_dataset(page: Page, selectors: Selectors, meta: DatasetMetadata, wait_ms: int) -> None:
-    print(f"[create] 建立資料集: {meta.dataset_name}")
-    page.click(selectors.create_button)
-    page.wait_for_timeout(1000)
+    log(f"[create] {meta.dataset_name}")
+    create_button = find_first_visible(page, selectors.create_button_candidates)
+    create_button.click()
+    page.wait_for_timeout(700)
+
     page.fill(selectors.name_input, meta.dataset_name)
     page.fill(selectors.description_input, meta.description)
     page.fill(selectors.tags_input, ", ".join(meta.tags))
-    page.wait_for_selector(selectors.confirm_button, state="visible")
-    wait_until_button_enabled(page, selectors.confirm_button, timeout_seconds=10)
-    page.click(selectors.confirm_button)
+
+    confirm_button = find_first_visible(page, selectors.create_confirm_candidates)
+    wait_until_button_enabled(confirm_button, timeout_seconds=10)
+    confirm_button.click()
     page.wait_for_timeout(wait_ms)
 
 
 def dataset_entry_locator(page: Page, dataset_name: str) -> str:
-    exact_zero = (
-        "xpath="
-        f"//div[contains(., '{dataset_name}') and contains(., '0 張影像')]"
-        f"//a[contains(normalize-space(.), '{dataset_name}')]"
-    )
-    if page.locator(exact_zero).count() > 0:
-        return exact_zero
-    fallback = f"xpath=//a[normalize-space()='{dataset_name}' or contains(normalize-space(), '{dataset_name}')]"
-    return fallback
+    exact = f"xpath=//a[normalize-space()='{dataset_name}']"
+    if page.locator(exact).count() > 0:
+        return exact
+    return f"xpath=//a[contains(normalize-space(), '{dataset_name}')]"
 
 
 def select_dataset(page: Page, dataset_name: str) -> None:
     locator = dataset_entry_locator(page, dataset_name)
     page.wait_for_selector(locator, state="visible", timeout=15000)
     page.click(locator)
-    page.wait_for_timeout(1500)
-    print(f"[select] 已選擇資料集: {dataset_name}")
+    page.wait_for_timeout(1200)
+    log(f"[select] {dataset_name}")
 
 
 def set_zip_file(page: Page, selectors: Selectors, file_path: Path) -> None:
     zip_input = page.locator(selectors.zip_input_primary).first
     if zip_input.count() == 0:
-        zip_input = page.locator(selectors.zip_input_fallback)
+        zip_input = page.locator(selectors.zip_input_fallback).first
     if zip_input.count() == 0:
-        raise RuntimeError("找不到 ZIP 上傳 input，請更新選擇器。")
+        raise RuntimeError("Cannot find ZIP file input element.")
     zip_input.set_input_files(str(file_path))
     page.wait_for_selector(selectors.upload_list, state="attached", timeout=15000)
-    print(f"[upload] 已選擇 ZIP: {file_path.name}")
+    log(f"[upload] selected ZIP: {file_path.name}")
 
 
 def trigger_import(page: Page, selectors: Selectors, wait_ms: int) -> None:
-    page.wait_for_selector(selectors.import_button, state="visible", timeout=15000)
-    wait_until_button_enabled(page, selectors.import_button, timeout_seconds=15)
-    page.click(selectors.import_button)
-    print("[upload] 已點擊匯入 ZIP")
+    import_button = find_first_visible(page, selectors.import_button_candidates)
+    wait_until_button_enabled(import_button, timeout_seconds=15)
+    import_button.click()
+    log("[upload] import clicked")
     page.wait_for_timeout(wait_ms)
 
 
-def upload_single_dataset(
-    page: Page,
-    selectors: Selectors,
-    meta: DatasetMetadata,
-    args: argparse.Namespace,
-) -> None:
+def upload_single_dataset(page: Page, selectors: Selectors, meta: DatasetMetadata, args: argparse.Namespace) -> None:
     screenshot_paths: list[Path] = []
     screenshot_dir = Path(args.screenshot_dir) if args.screenshot_dir else None
 
     create_dataset(page, selectors, meta, args.post_create_wait_ms)
     if screenshot_dir:
-        save_debug_screenshot(
-            page,
-            screenshot_paths,
-            screenshot_dir / f"before_select_{meta.dataset_name}.png",
-        )
+        save_debug_screenshot(page, screenshot_paths, screenshot_dir / f"before_select_{meta.dataset_name}.png")
 
     select_dataset(page, meta.dataset_name)
     if screenshot_dir:
-        save_debug_screenshot(
-            page,
-            screenshot_paths,
-            screenshot_dir / f"after_select_{meta.dataset_name}.png",
-        )
+        save_debug_screenshot(page, screenshot_paths, screenshot_dir / f"after_select_{meta.dataset_name}.png")
 
     set_zip_file(page, selectors, meta.source_zip)
     if screenshot_dir:
-        save_debug_screenshot(
-            page,
-            screenshot_paths,
-            screenshot_dir / f"after_zip_select_{meta.dataset_name}.png",
-        )
+        save_debug_screenshot(page, screenshot_paths, screenshot_dir / f"after_zip_select_{meta.dataset_name}.png")
 
     trigger_import(page, selectors, args.post_import_wait_ms)
     if screenshot_dir:
-        save_debug_screenshot(
-            page,
-            screenshot_paths,
-            screenshot_dir / f"after_import_click_{meta.dataset_name}.png",
-        )
+        save_debug_screenshot(page, screenshot_paths, screenshot_dir / f"after_import_click_{meta.dataset_name}.png")
 
     page.goto(args.base_url)
     page.wait_for_timeout(2000)
@@ -706,29 +711,32 @@ def main() -> int:
     selectors = Selectors()
     metadata_items = build_metadata_list(args)
 
-    print("[info] 準備上傳以下資料集：")
+    log("[info] upload plan")
     for meta in metadata_items:
-        print(f"  - {meta.dataset_name} <- {meta.source_zip.name}")
-        print(f"    description: {meta.description}")
-        print(f"    tags: {', '.join(meta.tags)}")
+        log(f"  - {meta.dataset_name} <- {meta.source_zip.name}")
+        log(f"    description: {meta.description}")
+        log(f"    tags: {', '.join(meta.tags)}")
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(channel=args.browser_channel, headless=args.headless)
         context = browser.new_context()
         page = context.new_page()
         try:
-            page.goto(args.base_url)
-            wait_for_manual_login_if_needed(page, args.require_manual_login)
+            page.goto(args.login_url or args.base_url)
+            if args.username and args.password:
+                login_with_credentials_if_provided(page, args.username, args.password)
+            else:
+                wait_for_manual_login_if_needed(page, args.require_manual_login)
             ensure_project_page(page, args.base_url)
             for meta in metadata_items:
                 upload_single_dataset(page, selectors, meta, args)
-            print("🎉 所有資料集都已完成上傳流程。")
+            log("[done] all datasets uploaded")
             return 0
         except PlaywrightTimeoutError as exc:
-            print(f"[error] Playwright timeout: {exc}", file=sys.stderr)
+            log(f"[error] Playwright timeout: {exc}")
             return 1
         except Exception as exc:
-            print(f"[error] 發生錯誤: {exc}", file=sys.stderr)
+            log(f"[error] {exc}")
             return 1
         finally:
             context.close()

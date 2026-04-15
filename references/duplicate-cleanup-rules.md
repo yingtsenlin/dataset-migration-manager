@@ -3,21 +3,22 @@
 ## Goal
 
 When multiple datasets have the same name, keep only the newest created dataset.
-The current dataset list page is sorted by time, so top-to-bottom order may be used as the fallback keep/delete order when visible timestamps are missing.
+The current dataset list page is sorted by time, so keep the top item and delete items below it when `--assume-ui-sorted-newest-first` is enabled (default).
 
 ## Required procedure
 
 1. Group datasets by exact same name.
-2. Compare created timestamps when available.
-3. Identify:
+2. When `--assume-ui-sorted-newest-first` is enabled, use top-to-bottom list order directly.
+3. When UI-order mode is disabled, compare created timestamps when available.
+4. Identify:
    - keep target: newest created dataset
    - delete targets: all older datasets with the same name
-4. Verify that the keep target is the expected post-upload dataset when possible.
-5. Delete only after the keep/delete decision is explicit.
+5. Verify that the keep target is the expected post-upload dataset when possible.
+6. Delete only after the keep/delete decision is explicit.
 
 ## Safety rules
 
-- If created time is missing, prefer the current UI order because the page is time-sorted.
+- In default mode, always treat top as newest and delete lower duplicates.
 - If two datasets have the same name and indistinguishable timestamps, keep the topmost one in the current list order.
 - If the newest dataset appears incomplete while an older dataset appears valid, do not auto-delete. Report first.
 - Prefer exact-name match only unless the user explicitly requests fuzzy matching.
