@@ -11,6 +11,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
+from name_standardization import normalize_site_tag, parse_name_tokens
+
 try:
     from PIL import Image, ImageStat
 except ImportError:
@@ -24,6 +26,7 @@ LABEL_DIR_NAMES = {"labels", "label"}
 DESCRIPTION_PRIORITY = ["people", "person", "helmet", "vest", "pack", "backpack", "mask", "bike", "motorcycle", "truck", "car"]
 TAG_PRIORITY = ["people", "person", "helmet", "vest", "pack", "backpack", "mask", "bike", "motorcycle", "truck", "car"]
 AI_GEN_HINTS = ("gemini", "grok", "synth", "synthetic", "genai", "generative", "diffusion")
+LEGACY_HINTS = ("legacy", "old", "migration", "migrate", "historical", "archive")
 
 TAG_HINTS = {
     "helmet": ["helmet", "hardhat", "hard-hat", "safety helmet", "\u5b89\u5168\u5e3d"],
@@ -120,46 +123,14 @@ def iter_dataset_targets(source: Path) -> list[Path]:
     return [source]
 
 
-def infer_tokens_from_name(stem: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    parts = [part for part in re.split(r"[_\-\s]+", stem) if part]
-    apc_id = parts[0] if parts else None
-
-    date_token = None
-    time_token = None
-    for index, part in enumerate(parts):
-        if not date_token and re.fullmatch(r"\d{6}|\d{8}", part):
-            date_token = part
-            for candidate in parts[index + 1 :]:
-                if re.fullmatch(r"\d{4}|\d{6}", candidate):
-                    time_token = candidate
-                    break
-            continue
-        if not time_token and re.fullmatch(r"\d{4}|\d{6}", part):
-            time_token = part
-
-    return apc_id, date_token, time_token
-
-
-def normalize_site_tag(apc_id: Optional[str]) -> Optional[str]:
-    if not apc_id:
-        return None
-    normalized = apc_id.strip().lower()
-    if not normalized:
-        return None
-
-    match = re.match(r"^([a-z]+)", normalized)
-    if not match:
-        return None
-
-    site_tag = match.group(1)
-    if len(site_tag) < 3:
-        return normalized
-    return site_tag
-
-
 def has_ai_gen_hint(stem: str) -> bool:
     lowered = stem.lower()
     return any(hint in lowered for hint in AI_GEN_HINTS)
+
+
+def has_legacy_hint(stem: str) -> bool:
+    lowered = stem.lower()
+    return any(hint in lowered for hint in LEGACY_HINTS)
 
 
 def infer_day_or_night(time_token: Optional[str]) -> Optional[str]:
@@ -467,9 +438,9 @@ def build_description(periods: list[str], observed_tags: list[str], fallback_tag
     return "\uff0c".join(dict.fromkeys(description_tokens))
 
 
-def build_tags(stem: str, apc_id: Optional[str], periods: list[str], observed_tags: list[str], fallback_tags: Counter[str]) -> list[str]:
+def build_tags(stem: str, site_token: Optional[str], periods: list[str], observed_tags: list[str], fallback_tags: Counter[str]) -> list[str]:
     tags: list[str] = []
-    site_tag = normalize_site_tag(apc_id)
+    site_tag = normalize_site_tag(site_token)
 
     if site_tag:
         tags.append(site_tag)
@@ -495,8 +466,12 @@ def build_tags(stem: str, apc_id: Optional[str], periods: list[str], observed_ta
 
 def summarize_entries(target: Path, sample_limit: int) -> DatasetSummary:
     source_kind = "zip" if target.is_file() else "directory"
-    stem = target.stem if target.is_file() else target.name
-    apc_id, date_token, time_token = infer_tokens_from_name(stem)
+    raw_stem = target.stem if target.is_file() else target.name
+    name_tokens = parse_name_tokens(raw_stem)
+    stem = name_tokens.normalized_stem
+    apc_id = name_tokens.site_token
+    date_token = name_tokens.date_token
+    time_token = name_tokens.time_token
 
     entries = list(iter_entries_from_zip(target) if target.is_file() else iter_entries_from_dir(target))
 

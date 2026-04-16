@@ -1,20 +1,21 @@
 ﻿---
 name: dataset-migration-manager
-description: manage migration of legacy datasets into a new dataset platform. use when chatgpt needs to inspect legacy dataset contents, draft dataset descriptions and tags from filenames and annotations, adapt or run the existing playwright upload automation, remove duplicate datasets with the same exact name while keeping the newest one, or validate a migration result.
+description: manage migration of legacy datasets into a new dataset platform. use when chatgpt needs to prepare dataset zips, inspect metadata, upload via playwright, resume interrupted uploads, verify uploaded datasets actually exist on the site, clean duplicates by explicit IDs, and report migration results.
 ---
 
 # Dataset migration manager
 
-Use this skill to handle legacy-to-new dataset migration as a controlled workflow, not as a single upload action.
+Use this skill as an end-to-end migration workflow, not a single upload command.
 
 ## Required resources
 
-Use these bundled files directly:
-
+- `scripts/name_standardization.py`
+- `scripts/prepare_renamed_zips.py`
 - `scripts/inspect_dataset_source.py`
 - `scripts/upload_dataset.py`
-- `scripts/cleanup_duplicates.py`
 - `scripts/find_datasets_by_creator_status.py`
+- `scripts/delete_datasets_by_id.py`
+- `scripts/verify_project_datasets.py`
 - `references/workflow.md`
 - `references/description-rules.md`
 - `references/tagging-rules.md`
@@ -25,267 +26,144 @@ Use these bundled files directly:
 
 Unless the user explicitly asks for only one stage, execute tasks in this order:
 
-1. Inspect the source dataset.
-2. Draft or revise metadata.
-3. Review the upload automation and patch only if needed.
-4. Upload the dataset.
-5. Report duplicate-cleanup candidates.
-6. Apply cleanup only when the keep target is reliable.
-7. Validate the result.
-8. Produce a concise final summary.
+1. Prepare source ZIPs into the user-specified output folder.
+2. Inspect prepared ZIPs and draft metadata.
+3. Patch upload automation only if UI changed.
+4. Upload datasets.
+5. If interrupted, resume only pending datasets from logs.
+6. Verify target dataset names really exist on the project page.
+7. Run duplicate cleanup by explicit dataset IDs when needed.
+8. Produce a concise result report.
 
-Use `references/workflow.md` for branching logic and task classification.
+Use `references/workflow.md` for branching logic and safety checks.
 
-## Stage 1: inspect the source dataset
+## Stage 1: prepare source ZIPs (required)
 
-Use `scripts/inspect_dataset_source.py` before upload unless the user explicitly provides final metadata and only wants execution.
+Always run `scripts/prepare_renamed_zips.py` before inspect/upload when the source is a folder.
 
-### Inspection goals
+### What this stage does
 
-Collect or infer:
+- normalizes dataset names with shared rules
+- converts `cam...` to `CGTD...`
+- normalizes `ttc...` to `ttcps...`
+- ensures each ZIP contains `data.yaml`
+- writes processed ZIPs into a target output folder without mutating source folder
 
-- source kind: zip or directory
-- dataset name candidate
-- `apc_id`, `date_token`, `time_token` when present in the filename stem
-- day or night inferred from the filename time token
-- image count
-- annotation count
-- representative image and annotation paths
-- keyword hits from annotations and filenames
-- class names observed from `labels/*.txt`, matched against `data.yaml`
-- draft description
-- draft tags
-- source warnings
+### Default command
 
-### Default command pattern
+```powershell
+python .\scripts\prepare_renamed_zips.py `
+  --source ".\path\to\source" `
+  --output ".\path\to\prepared"
+```
+
+## Stage 2: inspect and metadata draft
+
+Use `scripts/inspect_dataset_source.py` on prepared ZIPs.
 
 ```powershell
 python .\scripts\inspect_dataset_source.py `
-  --source ".\path\to\zip-or-folder" `
+  --source ".\path\to\prepared" `
   --output-format pretty
 ```
 
-Use `--output-format json` when another tool or script needs to consume the result.
+Inspection expectations:
 
-### Inspection interpretation rules
+- image / annotation counts
+- class evidence from `labels/*.txt` + `data.yaml`
+- suggested description and tags
+- warnings for incomplete sources
 
-- Treat `suggested_description`, `suggested_tags`, and `notes` as the baseline draft.
-- Prefer actual label classes matched through `data.yaml` over filename-only guesses.
-- If the source contains no common annotation files, continue with conservative metadata and mention the warning.
-- If the source contains no common image files, stop and report unless the user explicitly wants metadata drafting only.
-- When multiple ZIPs are found in a source directory, inspect all of them and treat each ZIP as a separate migration target.
+## Stage 3: upload
 
-## Status Verification Utility
-
-Use `scripts/find_datasets_by_creator_status.py` when the user asks to filter datasets by creator and review status.
-
-Important behavior:
-
-- Status labels are read from card tags in `ant-card-extra` (for example `待審核`).
-- Default matching includes common alias pairs:
-  - `審核中` also matches `待審核`
-  - `待審核` also matches `審核中`
-- Add `--strict-status` if exact status text is required.
-
-Default command pattern:
-
-```powershell
-python .\scripts\find_datasets_by_creator_status.py `
-  --base-url "http://<dataset-list-url>" `
-  --creator "林盈岑" `
-  --status "審核中" `
-  --require-manual-login `
-  --output-format pretty
-```
-
-## Stage 2: generate or revise metadata
-
-Use:
-
-- `references/description-rules.md`
-- `references/tagging-rules.md`
-
-### Metadata priorities
-
-Priority order:
-
-1. explicit user-provided values
-2. reliable inspection output from `inspect_dataset_source.py`
-3. fallback inference from the upload script naming rules
-
-### Metadata rules
-
-- Keep descriptions in traditional chinese.
-- Keep tags in english lowercase.
-- Prefer observable facts over guesses.
-- Preserve stable project tags such as `ttcps` when supported by the source stem or project rules.
-- Normalize plant/site tags to the alphabetic site prefix only, such as `ttcps01` -> `ttcps`.
-- If the dataset title or stem contains generative-AI hints such as `gemini`, `grok`, or `synth`, add the tag `AI Gen`.
-- In descriptions, use `一人` for `person` and `多人` for `people`.
-- For AI-generated imagery without a filename time token, sample two images to infer day/night; if the samples disagree, keep both tags.
-- Add `legacy` only when the filename or other reliable source evidence indicates legacy / migrated / old data.
-
-### Important consistency rule
-
-`upload_dataset.py` has a simpler filename-based fallback than `inspect_dataset_source.py`.
-
-- Prefer the inspection result when it is available.
-- Only rely on upload-script defaults when inspection is skipped or when the user intentionally wants a quick filename-based upload.
-
-## Stage 3: review and adapt the upload automation
-
-Use `scripts/upload_dataset.py` as the primary upload entrypoint.
-
-Do not rewrite it from scratch unless reuse is clearly impractical. Prefer the smallest safe patch.
-
-### Current upload-script capabilities
-
-- accept a single ZIP or a directory containing multiple ZIP files
-- pause for manual login with `--require-manual-login`
-- override metadata in single-ZIP mode with:
-  - `--dataset-name`
-  - `--description`
-  - `--tags`
-- change browser channel and headless mode
-- capture optional debug screenshots with `--screenshot-dir`
-- keep or remove debug screenshots using `--keep-debug-screenshots`
-
-### Default command pattern
+Use `scripts/upload_dataset.py` as the only uploader.
 
 ```powershell
 python .\scripts\upload_dataset.py `
   --base-url "http://<dataset-list-url>" `
-  --source ".\path\to\zip-or-folder" `
-  --require-manual-login
+  --source ".\path\to\prepared" `
+  --username "<username>" `
+  --password "<password>" `
+  --headless
 ```
 
-### Single-dataset override pattern
+Upload rules:
+
+- report source/name/description/tags before upload
+- stop immediately on create/import failures
+- do not run duplicate deletion when upload success is unclear
+
+## Stage 4: interrupted upload resume
+
+If upload was interrupted:
+
+1. parse upload logs and collect already uploaded ZIP names
+2. diff against prepared folder
+3. upload only pending ZIPs
+4. report pending count, resumed count, missing count
+
+Keep log files in `artifacts/` only as long as needed; clean temporary files after confirmation.
+
+## Stage 5: existence verification (required after bulk upload)
+
+Use `scripts/verify_project_datasets.py` to verify target names exist on the project page.
 
 ```powershell
-python .\scripts\upload_dataset.py `
+python .\scripts\verify_project_datasets.py `
   --base-url "http://<dataset-list-url>" `
-  --source ".\path\to\single.zip" `
-  --dataset-name "<dataset-name>" `
-  --description "<description>" `
-  --tags "<tag1,tag2,...>" `
-  --require-manual-login
+  --target-file ".\artifacts\target_names.txt" `
+  --username "<username>" `
+  --password "<password>" `
+  --headless `
+  --output-file ".\artifacts\verify_result.json"
 ```
 
-### When to patch the upload script
+Required output:
 
-Before running upload, inspect whether the website changed in any of these ways:
+- target count
+- matched count
+- missing count
+- missing name list (if any)
 
-- create-dataset button text or placement
-- modal structure
-- selectors for name, description, or tags
-- ZIP upload input
-- import button text or enable/disable behavior
-- dataset-list entry structure after creation
+## Stage 6: duplicate cleanup (ID-first only)
 
-If the UI changed, explain:
+Use `scripts/find_datasets_by_creator_status.py` + `scripts/delete_datasets_by_id.py`.
 
-1. what changed in the website
-2. which selector or wait logic was updated
-3. whether the change affects upload only or also cleanup
+Rules:
 
-## Stage 4: upload the dataset
+- search first and export IDs
+- review keep/delete candidates
+- delete by explicit IDs only
+- for same-name duplicates, keep the largest ID
 
-Before upload, print or state:
-
-- source path
-- final dataset name
-- final description
-- final tags
-
-Operational rules:
-
-- use screenshots when debugging unstable UI behavior
-- return to the dataset list page after each upload batch
-- if an import fails, stop and report before cleanup
-- when multiple ZIPs are uploaded from a folder, do not use per-file metadata overrides on that same command
-
-## Stage 5: duplicate cleanup
-
-Use `scripts/cleanup_duplicates.py` after upload whenever same-name duplicates may exist.
-
-Always start with report mode unless the user explicitly asks to apply deletion immediately and the safety conditions are satisfied.
-
-### Safe default command
-
-```powershell
-python .\scripts\cleanup_duplicates.py `
-  --base-url "http://<dataset-list-url>" `
-  --dataset-name "<exact-dataset-name>" `
-  --mode report `
-  --require-manual-login
-```
-
-### Apply command
-
-```powershell
-python .\scripts\cleanup_duplicates.py `
-  --base-url "http://<dataset-list-url>" `
-  --dataset-name "<exact-dataset-name>" `
-  --mode apply `
-  --require-manual-login
-```
-
-### Cleanup rules
-
-Also follow `references/duplicate-cleanup-rules.md`.
-
-- Match exact same name only unless the user explicitly requests fuzzy matching.
-- Default mode uses current UI order (newest on top): keep the top item and delete lower duplicates.
-- If UI sorting is uncertain, switch to report mode first and require explicit confirmation before apply.
-- Only disable `--assume-ui-sorted-newest-first` when the page is not reliably sorted newest-first.
-- Never claim a delete is safe if the keep target cannot be explained.
-
-## Stage 6: validate the migration result
-
-After upload and optional cleanup, validate with `references/quality-checklist.md`.
-
-At minimum, verify:
-
-- dataset exists
-- description exists
-- tags exist
-- uploaded source appears present
-- duplicate cleanup did not remove the newest target incorrectly
-
-## Response format
-
-Unless the user asks for a different format, produce:
+## Stage 7: final report format
 
 ### Dataset summary
-- source path
-- inferred or provided dataset name
-- image and annotation counts
-- notable keywords or classes
 
-### Metadata
-- final description
-- final tags
-- why these values were chosen
-- confidence level
+- source folder
+- prepared output folder
+- total target count
 
-### Script changes
-- changed files
-- selector or logic updates
-- risk level
+### Upload summary
 
-### Upload result
-- attempted command
-- outcome
-- screenshots used or not used
+- uploaded count
+- resumed count (if any)
+- failed count (if any)
 
-### Duplicate cleanup
-- report or apply mode
-- keep target
-- delete targets
-- reason for the decision
+### Verification summary
 
-### Validation
-- checks passed
-- checks not confirmed
-- manual follow-up items
+- matched count
+- missing count
+- missing names
 
+### Cleanup summary
+
+- duplicate groups reviewed
+- IDs deleted
+- IDs kept
+
+### Risks / manual follow-up
+
+- unresolved UI instability
+- unclear/missing metadata evidence
+- items needing manual website confirmation

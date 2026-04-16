@@ -6,12 +6,14 @@ This file defines the detailed migration decision flow for `dataset-migration-ma
 
 1. Determine the user's intent.
 2. Choose the minimum necessary stage.
-3. Inspect the source before generating or applying metadata.
-4. Validate metadata before upload.
-5. Update automation only if needed.
-6. Upload first, then run ID-based duplicate cleanup.
-7. Validate after every destructive or state-changing action.
-8. End with a short operational summary.
+3. Prepare datasets to a user-specified output folder.
+4. Inspect the source before generating or applying metadata.
+5. Validate metadata before upload.
+6. Update automation only if needed.
+7. Upload first, then run ID-based duplicate cleanup.
+8. Verify target dataset names exist on website.
+9. Validate after every destructive or state-changing action.
+10. End with a short operational summary.
 
 ## Step 1: classify the request
 
@@ -23,7 +25,7 @@ Use the full flow when the user asks to:
 - create and upload a new dataset
 - upload and then clean duplicates
 
-Follow steps 2 through 7.
+Follow steps 2 through 9.
 
 ### B. Metadata-only preparation
 
@@ -70,7 +72,29 @@ Run:
 2. report keep/delete candidates from IDs
 3. apply deletion by ID only
 
-## Step 2: inspect the source dataset
+## Step 2: prepare datasets to output folder
+
+Use `scripts/prepare_renamed_zips.py` before inspect/upload.  
+This is the default required preprocessing step when the user provides a folder.
+
+### Naming normalization rules
+
+- normalize delimiters to `_` (space/hyphen to underscore)
+- convert `ttc...` prefix to `ttcps...`
+- convert `cam...` prefix to `CGTD...` for site code standardization
+- keep date/time tokens in `site_date_time` shape when detectable
+
+Example:
+
+- `cam16_260416_1012` -> `CGTD16_260416_1012`
+
+### Required preprocessing outputs
+
+- all ZIPs are copied into the user-specified output folder
+- filename normalization is applied
+- missing `data.yaml` is added into each ZIP
+
+## Step 3: inspect the source dataset
 
 Use `scripts/inspect_dataset_source.py` before upload unless the user explicitly provides final metadata and only wants script execution.
 
@@ -96,7 +120,7 @@ Capture:
 - If annotations are missing, still continue with a conservative metadata draft.
 - If both are sparse, draft minimal metadata and ask for manual confirmation only when it blocks correctness.
 
-## Step 3: draft metadata
+## Step 4: draft metadata
 
 Use the inspection result as the baseline.
 
@@ -143,7 +167,7 @@ Do not over-specify when:
 
 Prefer a minimal draft plus a warning.
 
-## Step 4: decide whether to patch the upload script
+## Step 5: decide whether to patch the upload script
 
 Before running `scripts/upload_dataset.py`, compare the expected UI behavior with the current website.
 
@@ -163,7 +187,7 @@ Before running `scripts/upload_dataset.py`, compare the expected UI behavior wit
 - explain every changed selector or wait condition
 - keep existing debug screenshot support intact
 
-## Step 5: upload the dataset
+## Step 6: upload the dataset
 
 ### Standard upload sequence
 
@@ -191,7 +215,7 @@ Stop and report immediately if:
 
 Do not continue to cleanup when upload is not clearly successful.
 
-## Step 6: evaluate duplicate cleanup (ID-first mandatory)
+## Step 7: evaluate duplicate cleanup (ID-first mandatory)
 
 Use `scripts/find_datasets_by_creator_status.py` + `scripts/delete_datasets_by_id.py` after a successful upload when duplicates are expected.
 
@@ -217,7 +241,23 @@ Do not apply deletion when:
 - keep target cannot be explained as the largest ID of the same-name group
 - the delete command is about to run without explicit ID resolution
 
-## Step 7: validate the result
+## Step 8: verify target names exist on website
+
+After bulk upload, run `scripts/verify_project_datasets.py` to verify target names are present on the project page.
+
+```powershell
+python .\scripts\verify_project_datasets.py `
+  --base-url "http://<dataset-list-url>" `
+  --target-file ".\artifacts\target_names.txt" `
+  --username "<username>" `
+  --password "<password>" `
+  --headless `
+  --output-file ".\artifacts\verify_result.json"
+```
+
+If `missing_count > 0`, do not proceed to cleanup before resolving missing uploads.
+
+## Step 9: validate the result
 
 After upload and any cleanup, validate:
 
@@ -232,8 +272,14 @@ After upload and any cleanup, validate:
 ### Inspect only
 
 ```powershell
-python .\scripts\inspect_dataset_source.py `
+python .\scripts\prepare_renamed_zips.py `
   --source ".\path\to\zip-or-folder" `
+  --output ".\path\to\prepared-output"
+```
+
+```powershell
+python .\scripts\inspect_dataset_source.py `
+  --source ".\path\to\prepared-output" `
   --output-format pretty
 ```
 

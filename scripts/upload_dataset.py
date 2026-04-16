@@ -15,6 +15,7 @@ from typing import Iterable, Optional
 from urllib.parse import urlparse
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from name_standardization import normalize_site_tag, parse_name_tokens
 
 try:
     from PIL import Image, ImageStat
@@ -162,41 +163,11 @@ def choose_description(override: Optional[str], inferred: str) -> str:
     return inferred
 
 
-def infer_tokens_from_name(stem: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    parts = [part for part in re.split(r"[_\-\s]+", stem) if part]
-    apc_id = parts[0] if parts else None
-
-    date_token = None
-    time_token = None
-    for index, part in enumerate(parts):
-        if not date_token and re.fullmatch(r"\d{6}|\d{8}", part):
-            date_token = part
-            for candidate in parts[index + 1 :]:
-                if re.fullmatch(r"\d{4}|\d{6}", candidate):
-                    time_token = candidate
-                    break
-            continue
-        if not time_token and re.fullmatch(r"\d{4}|\d{6}", part):
-            time_token = part
-    return apc_id, date_token, time_token
-
-
 def infer_period_from_time(time_str: Optional[str]) -> Optional[str]:
     if not time_str or len(time_str) < 2 or not time_str[:2].isdigit():
         return None
     hour = int(time_str[:2])
     return DAY_TEXT if 6 <= hour < 18 else NIGHT_TEXT
-
-
-def normalize_site_tag(apc_id: Optional[str]) -> Optional[str]:
-    if not apc_id:
-        return None
-    normalized = apc_id.strip().lower()
-    match = re.match(r"^([a-z]+)", normalized)
-    if not match:
-        return None
-    site_tag = match.group(1)
-    return site_tag if len(site_tag) >= 3 else normalized
 
 
 def has_ai_gen_hint(stem: str) -> bool:
@@ -373,9 +344,9 @@ def build_description(periods: list[str], observed_tags: list[str]) -> str:
     return "，".join(dict.fromkeys(description_tokens))
 
 
-def build_tags(stem: str, apc_id: Optional[str], periods: list[str], observed_tags: list[str]) -> list[str]:
+def build_tags(stem: str, site_token: Optional[str], periods: list[str], observed_tags: list[str]) -> list[str]:
     tags: list[str] = []
-    site_tag = normalize_site_tag(apc_id)
+    site_tag = normalize_site_tag(site_token)
     if site_tag:
         tags.append(site_tag)
     if has_ai_gen_hint(stem):
@@ -393,7 +364,10 @@ def build_tags(stem: str, apc_id: Optional[str], periods: list[str], observed_ta
 
 
 def infer_metadata_from_stem(stem: str, source_zip: Path) -> DatasetMetadata:
-    apc_id, _, time_str = infer_tokens_from_name(stem)
+    name_tokens = parse_name_tokens(stem)
+    normalized_stem = name_tokens.normalized_stem
+    site_token = name_tokens.site_token
+    time_str = name_tokens.time_token
     image_paths, label_entry_id_hits, yaml_names = inspect_zip_source(source_zip)
     observed_tags = build_observed_tags(label_entry_id_hits, yaml_names)
 
@@ -401,19 +375,19 @@ def infer_metadata_from_stem(stem: str, source_zip: Path) -> DatasetMetadata:
     period_from_name = infer_period_from_time(time_str)
     if period_from_name:
         periods.append(period_from_name)
-    elif has_ai_gen_hint(stem):
-        periods.extend(infer_periods_from_sample_images(source_zip, image_paths, stem))
+    elif has_ai_gen_hint(normalized_stem):
+        periods.extend(infer_periods_from_sample_images(source_zip, image_paths, normalized_stem))
 
     periods = list(dict.fromkeys(periods))
     description = choose_description(None, build_description(periods, observed_tags))
-    tags = build_tags(stem, apc_id, periods, observed_tags)
+    tags = build_tags(normalized_stem, site_token, periods, observed_tags)
 
     return DatasetMetadata(
-        dataset_name=stem,
+        dataset_name=normalized_stem,
         description=description,
         tags=tags,
         source_zip=source_zip,
-        apc_id=apc_id,
+        apc_id=site_token,
         time_str=time_str,
     )
 
