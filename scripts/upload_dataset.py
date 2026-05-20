@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+import json
 import random
 import re
 import sys
@@ -120,6 +121,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-name", help="Override dataset name for single ZIP mode.")
     parser.add_argument("--description", help="Override description for single ZIP mode.")
     parser.add_argument("--tags", help="Comma-separated tags override for single ZIP mode.")
+    parser.add_argument(
+        "--metadata-file",
+        help="Optional JSON file to override per-dataset description/tags/name. "
+        "Accepts a list of objects with fields: dataset_name, description, tags, source_zip or zip_path.",
+    )
     parser.add_argument("--browser-channel", default="msedge", help="Chromium channel name. Default: msedge")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode.")
     parser.add_argument("--require-manual-login", action="store_true", help="Pause for manual login.")
@@ -419,6 +425,52 @@ def build_metadata_list(args: argparse.Namespace) -> list[DatasetMetadata]:
         if args.append_test_suffix and not inferred.dataset_name.endswith("_test"):
             inferred.dataset_name = f"{inferred.dataset_name}_test"
         metadata_items.append(inferred)
+
+    if args.metadata_file:
+        metadata_path = Path(args.metadata_file)
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Cannot find --metadata-file path: {metadata_path}")
+        with metadata_path.open("r", encoding="utf-8-sig") as fh:
+            payload = json.load(fh)
+        if not isinstance(payload, list):
+            raise ValueError("--metadata-file must be a JSON list.")
+
+        zip_map: dict[str, DatasetMetadata] = {item.source_zip.name: item for item in metadata_items}
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            source_key = row.get("source_zip") or row.get("zip_path")
+            target: Optional[DatasetMetadata] = None
+            if isinstance(source_key, str) and source_key.strip():
+                source_name = Path(source_key).name
+                target = zip_map.get(source_name)
+            if target is None and isinstance(row.get("dataset_name"), str):
+                # Fallback match by inferred dataset name.
+                wanted_name = row["dataset_name"].strip()
+                for item in metadata_items:
+                    if item.dataset_name == wanted_name:
+                        target = item
+                        break
+            if target is None:
+                continue
+
+            name_override = row.get("dataset_name")
+            if isinstance(name_override, str) and name_override.strip():
+                target.dataset_name = name_override.strip()
+
+            desc_override = row.get("description")
+            if isinstance(desc_override, str) and desc_override.strip():
+                target.description = desc_override.strip()
+
+            tags_override = row.get("tags")
+            if isinstance(tags_override, str):
+                parsed = normalize_tags(tags_override)
+                if parsed:
+                    target.tags = parsed
+            elif isinstance(tags_override, list):
+                parsed = [str(x).strip() for x in tags_override if str(x).strip()]
+                if parsed:
+                    target.tags = parsed
 
     return metadata_items
 

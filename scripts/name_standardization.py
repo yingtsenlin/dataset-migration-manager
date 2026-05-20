@@ -7,19 +7,34 @@ from typing import Optional
 
 
 APC_CAM_MAPPING = {
-    "cam5202": "apc01",
-    "cam5203": "apc02",
-    "cam6601": "apc03",
-    "camccr01": "apc04",
-    "cam3001": "apc05",
-    "cam1101": "apc06",
-    "cam1102": "apc07",
-    "cam1201": "apc08",
-    "cam1202": "apc09",
-    "cam1301": "apc10",
-    "cam1302": "apc11",
-    "cam5201": "apc12",
-    "cam6101": "apc13",
+    "cam5202": "APC01",
+    "52cctv02": "APC01",
+    "cam5203": "APC02",
+    "52cctv03": "APC02",
+    "cam6601": "APC03",
+    "66cctv01": "APC03",
+    "camccr01": "APC04",
+    "ccrcctv01": "APC04",
+    "cam3001": "APC05",
+    "30cctv01": "APC05",
+    "cam1101": "APC06",
+    "11cctv01": "APC06",
+    "cam1102": "APC07",
+    "11cctv02": "APC07",
+    "cam1201": "APC08",
+    "12cctv01": "APC08",
+    "cam1202": "APC09",
+    "12cctv02": "APC09",
+    "cam1301": "APC10",
+    "13cctv01": "APC10",
+    "cam1302": "APC11",
+    "13cctv02": "APC11",
+    "cam5201": "APC12",
+    "52cctv01": "APC12",
+    "cam6101": "APC13",
+    "61cctv01": "APC13",
+    "cam6102": "APC14",
+    "61cctv02": "APC14",
 }
 
 
@@ -45,20 +60,28 @@ def _normalize_ttc_prefix(stem: str) -> str:
     return stem
 
 
+def _normalize_date_token(date_token: str) -> str:
+    # Keep YYMMDD in output. Convert YYYYMMDD -> YYMMDD.
+    if re.fullmatch(r"\d{8}", date_token):
+        return date_token[2:]
+    return date_token
+
+
 def _map_apc_cam_name(stem: str) -> Optional[str]:
     match = re.match(
-        r"(?i)^apc_(cam[0-9a-z]+)_(\d{6}|\d{8})_(\d{4}|\d{6})(?:_(\d+))?$",
+        r"(?i)^apc_([0-9a-z_]+)_(\d{6}|\d{8})_(\d{4}|\d{6})(?:_(\d+))?$",
         stem,
     )
     if not match:
         return None
 
-    cam_id = match.group(1).lower()
+    raw_cam_id = match.group(1).lower()
+    cam_id = re.sub(r"[^0-9a-z]", "", raw_cam_id)
     mapped_site = APC_CAM_MAPPING.get(cam_id)
     if not mapped_site:
         return None
 
-    date_token = match.group(2)
+    date_token = _normalize_date_token(match.group(2))
     time_token = match.group(3)
     chunk = match.group(4)
     base = f"{mapped_site}_{date_token}_{time_token}"
@@ -74,7 +97,7 @@ def _map_cam_to_cgtd(stem: str) -> Optional[str]:
         return None
 
     camera_id = match.group(1).upper()
-    date_token = match.group(2)
+    date_token = _normalize_date_token(match.group(2))
     time_token = match.group(3)
     suffix = match.group(4)
     base = f"CGTD{camera_id}_{date_token}_{time_token}"
